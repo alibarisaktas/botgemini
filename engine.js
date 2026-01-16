@@ -6,8 +6,7 @@ let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
 let lastUpdateId = 0; 
-let collectorTimeout = null; 
-let startTime = Date.now(); // Track when the bot started
+let startTime = Date.now();
 
 // --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
@@ -67,32 +66,22 @@ function startScanner() {
             const filtered = tickers
                 .filter(t => t.s.endsWith('USDT'))
                 .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'GBPUSDT'].includes(t.s))
-                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > (config.MIN_VOLUME_USDT || 1000000))
+                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > 1000000)
                 .map(t => t.s);
 
-            // Only trigger update if the top list actually changed
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
                 console.log(`🔥 Scanner: Watchlist updated (${hotlist.length} pairs).`);
-                
-                // Optimized Debounce: Shortened to 1s for faster connection
-                clearTimeout(collectorTimeout);
-                collectorTimeout = setTimeout(() => {
-                    startCollector();
-                }, 1000);
+                startCollector();
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
-// --- STAGE B: COLLECTING (Optimized) ---
+// --- STAGE B: COLLECTING (Stable Model) ---
 function startCollector() {
     if (collectorWs) {
-        try {
-            if (collectorWs.readyState !== WebSocket.CLOSED) {
-                collectorWs.terminate();
-            }
-        } catch (e) {}
+        try { collectorWs.terminate(); } catch (e) {}
     }
     
     if (hotlist.length === 0) return;
@@ -100,9 +89,6 @@ function startCollector() {
     const streams = hotlist.slice(0, 50).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
-    collectorWs.on('open', () => console.log("📡 Collector: AggTrade stream connected."));
-    collectorWs.on('error', (err) => console.error("Collector WS Log:", err.message));
-
     collectorWs.on('message', (msg) => {
         try {
             const parsed = JSON.parse(msg);
@@ -116,7 +102,7 @@ function startCollector() {
                 t: Date.now() 
             });
 
-            // Memory protection
+            // Keep memory light
             const cutoff = Date.now() - (3 * 3600000);
             if (tradeStore[data.s].length > 100) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
@@ -136,21 +122,14 @@ function startRadar() {
             if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
 
             const isNewState = stats.label !== stateMemory[s].lastLabel;
-            const cooldownDone = now - stateMemory[s].lastAlert > (config.ALERT_COOLDOWN_MIN || 25) * 60000;
+            const cooldownDone = now - stateMemory[s].lastAlert > 1500000; // 25 min
 
             if (isNewState || cooldownDone) {
-                sendTelegram(`*${s}* | ${stats.label}\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Buy Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x normal\n📝 _${stats.note}_`);
+                sendTelegram(`*${s}* | ${stats.label}\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
                 stateMemory[s].lastLabel = stats.label;
                 stateMemory[s].lastAlert = now;
             }
         });
-
-        // CALIBRATION CHECK: Send message once when 3h is reached
-        const uptimeHours = (Date.now() - startTime) / 3600000;
-        if (uptimeHours >= 3 && !stateMemory['CALIBRATED']) {
-            sendTelegram("🏆 *Calibration Complete*\nBaseline is now fully loaded (3h). Alert accuracy is now at maximum conviction.");
-            stateMemory['CALIBRATED'] = true;
-        }
     }, 30000);
 }
 
@@ -165,33 +144,23 @@ function startListener() {
                     lastUpdateId = update.update_id; 
                     const msg = update.message || update.channel_post;
                     if (!msg || !msg.text) continue;
-                    const text = msg.text.trim();
 
-                    if (text === '/status') {
-                        const memoryMB = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+                    if (msg.text === '/status') {
                         const tracked = Object.keys(tradeStore).length;
-                        const baselineLoad = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
-
-                        sendTelegram(
-                            `🤖 *Bot Health Status*\n` +
-                            `⏱ Uptime: ${Math.floor(process.uptime() / 60)} mins\n` +
-                            `📊 Baseline: ${baselineLoad}% Loaded\n` +
-                            `📁 Tracked Coins: ${tracked}\n` +
-                            `🧠 Memory: ${memoryMB} MB\n` +
-                            `🔥 Scanner: ${hotlist.length} pairs`
-                        );
+                        const baseline = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
+                        sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${Math.floor(process.uptime() / 60)}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n🔥 Scanner: ${hotlist.length}`);
                     }
 
-                    if (text.startsWith('/check')) {
-                        let symbol = text.split(' ')[1]?.toUpperCase();
+                    if (msg.text.startsWith('/check')) {
+                        let symbol = msg.text.split(' ')[1]?.toUpperCase();
                         if (!symbol) continue;
                         if (!symbol.endsWith('USDT')) symbol += 'USDT';
                         const stats = analyzeSymbol(symbol);
                         if (!stats) {
-                            sendTelegram(`❌ No data for ${symbol}. (Warming up...)`);
+                            sendTelegram(`❌ No data for ${symbol}.`);
                             continue;
                         }
-                        sendTelegram(`🔍 *Manual Check: ${symbol}*\nState: ${stats.label}\nBias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`);
+                        sendTelegram(`🔍 *Manual Check: ${symbol}*\nState: ${stats.label}\nBias: ${stats.fBias.toFixed(1)}%\nActivity: ${stats.actMult.toFixed(1)}x`);
                     }
                 }
             }
@@ -199,4 +168,4 @@ function startListener() {
     }, 5000);
 }
 
-module.exports = { startScanner, startRadar, startListener, sendTelegram, getHotlist: () => hotlist };
+module.exports = { startScanner, startRadar, startListener, sendTelegram };
