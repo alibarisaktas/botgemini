@@ -24,7 +24,9 @@ async function sendTelegram(text) {
 function analyzeSymbol(s) {
     const now = Date.now();
     const data = tradeStore[s];
-    if (!data || data.trades.length < 5) return null;
+    
+    // Safety: If no trades recorded yet, skip
+    if (!data || !data.trades || data.trades.length < 5) return null;
 
     const trades = data.trades;
     const fast = trades.filter(t => t.t > now - 600000); // 10m
@@ -42,12 +44,14 @@ function analyzeSymbol(s) {
     const bActivity = base.length / 180;
     const actMult = bActivity > 0 ? (fActivity / bActivity) : 1;
 
-    // --- 1H Price Change ---
+    // --- 1H Price Change (With Safety Guard) ---
     let change1h = 0;
-    if (hourAgo.length > 0) {
-        const oldPrice = hourAgo[0].p; // Price at the start of the 1h window
+    if (hourAgo.length > 0 && hourAgo[0]) {
+        const oldPrice = hourAgo[0].p; 
         const currentPrice = data.lastPrice;
-        change1h = ((currentPrice - oldPrice) / oldPrice) * 100;
+        if (oldPrice > 0) {
+            change1h = ((currentPrice - oldPrice) / oldPrice) * 100;
+        }
     }
 
     let label = "⚖️ MIXED TAPE";
@@ -72,7 +76,6 @@ function startScanner() {
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
-                console.log(`🔥 Scanner: Watchlist size ${hotlist.length}`);
                 startCollector();
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
@@ -104,12 +107,11 @@ function startCollector() {
             tradeStore[data.s].lastPrice = price;
             tradeStore[data.s].trades.push({ 
                 usd: price * parseFloat(data.q), 
-                p: price, // Store price at time of trade
+                p: price, 
                 side: data.m ? 'SELL' : 'BUY', 
                 t: Date.now() 
             });
 
-            // Memory Management: Keep 3 hours of data
             const cutoff = Date.now() - 10800000;
             if (tradeStore[data.s].trades.length > 500) {
                 tradeStore[data.s].trades = tradeStore[data.s].trades.filter(t => t.t > cutoff);
