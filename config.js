@@ -1,9 +1,18 @@
+/**
+ * Configuration using Railway Environment Variables.
+ * Accessed via process.env.KEY_NAME
+ */
 module.exports = {
-    TG_TOKEN: "8240232911:AAH6PYxoJAH_1RMm3BIeP2Is9zdqChsC4Lk",
-    TG_CHAT_ID: "-1003664179711",
-    SCAN_INTERVAL_SEC: 60,
-    ALERT_COOLDOWN_MIN: 25,
-    HEARTBEAT_HOURS: 3,
-    MIN_VOLUME_USDT: 1000000, // $1M 24h vol
-    WHALE_THRESHOLD_USD: 50000 // $50k single trade aggression
+    // These will be pulled from your Railway "Variables" tab
+    TG_TOKEN: process.env.TG_TOKEN,
+    TG_CHAT_ID: process.env.TG_CHAT_ID,
+    
+    // Core Engine Settings (can also be variables if you want to tweak from UI)
+    SCAN_INTERVAL_SEC: Number(process.env.SCAN_INTERVAL_SEC) || 60,
+    ALERT_COOLDOWN_MIN: Number(process.env.ALERT_COOLDOWN_MIN) || 25,
+    HEARTBEAT_HOURS: Number(process.env.HEARTBEAT_HOURS) || 3,
+    
+    // Thresholds
+    MIN_VOLUME_USDT: 1000000, 
+    WHALE_THRESHOLD_USD: Number(process.env.WHALE_THRESHOLD_USD) || 50000 
 };
