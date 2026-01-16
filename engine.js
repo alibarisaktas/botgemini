@@ -7,8 +7,9 @@ let collectorWs = null;
 let stateMemory = {}; 
 let lastUpdateId = 0; 
 let collectorTimeout = null; 
+let startTime = Date.now(); // Track when the bot started
 
-// --- 1. TELEGRAM OUTBOUND (The Missing Function) ---
+// --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
     if (!config.TG_TOKEN || !config.TG_CHAT_ID) return;
     try {
@@ -20,7 +21,7 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Send Error:", e.message); }
 }
 
-// --- 2. LOGIC: ANALYSIS ENGINE ---
+// --- LOGIC: ANALYSIS ENGINE ---
 function analyzeSymbol(s) {
     const now = Date.now();
     const trades = tradeStore[s] || [];
@@ -57,7 +58,7 @@ function analyzeSymbol(s) {
     return { label, note, fBias, actMult, totalFast };
 }
 
-// --- 3. STAGE A: FILTERING ---
+// --- STAGE A: FILTERING ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
@@ -66,30 +67,32 @@ function startScanner() {
             const filtered = tickers
                 .filter(t => t.s.endsWith('USDT'))
                 .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'GBPUSDT'].includes(t.s))
-                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
+                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > (config.MIN_VOLUME_USDT || 1000000))
                 .map(t => t.s);
 
+            // Only trigger update if the top list actually changed
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
                 console.log(`🔥 Scanner: Watchlist updated (${hotlist.length} pairs).`);
                 
+                // Optimized Debounce: Shortened to 1s for faster connection
                 clearTimeout(collectorTimeout);
                 collectorTimeout = setTimeout(() => {
                     startCollector();
-                }, 2000);
+                }, 1000);
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
-// --- 4. STAGE B: COLLECTING ---
+// --- STAGE B: COLLECTING (Optimized) ---
 function startCollector() {
     if (collectorWs) {
         try {
             if (collectorWs.readyState !== WebSocket.CLOSED) {
                 collectorWs.terminate();
             }
-        } catch (e) { console.log("⚠️ Collector cleanup performed."); }
+        } catch (e) {}
     }
     
     if (hotlist.length === 0) return;
@@ -97,6 +100,7 @@ function startCollector() {
     const streams = hotlist.slice(0, 50).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
+    collectorWs.on('open', () => console.log("📡 Collector: AggTrade stream connected."));
     collectorWs.on('error', (err) => console.error("Collector WS Log:", err.message));
 
     collectorWs.on('message', (msg) => {
@@ -112,6 +116,7 @@ function startCollector() {
                 t: Date.now() 
             });
 
+            // Memory protection
             const cutoff = Date.now() - (3 * 3600000);
             if (tradeStore[data.s].length > 100) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
@@ -120,7 +125,7 @@ function startCollector() {
     });
 }
 
-// --- 5. RADAR: ALERTS ---
+// --- RADAR: ALERTS ---
 function startRadar() {
     setInterval(() => {
         hotlist.forEach(s => {
@@ -134,42 +139,44 @@ function startRadar() {
             const cooldownDone = now - stateMemory[s].lastAlert > (config.ALERT_COOLDOWN_MIN || 25) * 60000;
 
             if (isNewState || cooldownDone) {
-                sendTelegram(
-                    `*${s}* | ${stats.label}\n` +
-                    `💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
-                    `📊 Buy Bias: ${stats.fBias.toFixed(1)}%\n` +
-                    `⚡ Activity: ${stats.actMult.toFixed(1)}x normal\n` +
-                    `📝 _${stats.note}_`
-                );
+                sendTelegram(`*${s}* | ${stats.label}\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Buy Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x normal\n📝 _${stats.note}_`);
                 stateMemory[s].lastLabel = stats.label;
                 stateMemory[s].lastAlert = now;
             }
         });
+
+        // CALIBRATION CHECK: Send message once when 3h is reached
+        const uptimeHours = (Date.now() - startTime) / 3600000;
+        if (uptimeHours >= 3 && !stateMemory['CALIBRATED']) {
+            sendTelegram("🏆 *Calibration Complete*\nBaseline is now fully loaded (3h). Alert accuracy is now at maximum conviction.");
+            stateMemory['CALIBRATED'] = true;
+        }
     }, 30000);
 }
 
-// --- 6. LISTENER: COMMANDS ---
+// --- LISTENER: COMMANDS ---
 function startListener() {
-    console.log("📥 Telegram Listener Active...");
     setInterval(async () => {
         try {
             const res = await fetch(`https://api.telegram.org/bot${config.TG_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=10`);
             const data = await res.json();
-
             if (data.ok && data.result.length > 0) {
                 for (const update of data.result) {
                     lastUpdateId = update.update_id; 
-
                     const msg = update.message || update.channel_post;
                     if (!msg || !msg.text) continue;
                     const text = msg.text.trim();
 
                     if (text === '/status') {
                         const memoryMB = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+                        const tracked = Object.keys(tradeStore).length;
+                        const baselineLoad = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
+
                         sendTelegram(
                             `🤖 *Bot Health Status*\n` +
                             `⏱ Uptime: ${Math.floor(process.uptime() / 60)} mins\n` +
-                            `📁 Tracked Coins: ${Object.keys(tradeStore).length}\n` +
+                            `📊 Baseline: ${baselineLoad}% Loaded\n` +
+                            `📁 Tracked Coins: ${tracked}\n` +
                             `🧠 Memory: ${memoryMB} MB\n` +
                             `🔥 Scanner: ${hotlist.length} pairs`
                         );
@@ -188,15 +195,8 @@ function startListener() {
                     }
                 }
             }
-        } catch (e) { console.error("Listener Error:", e.message); }
+        } catch (e) {}
     }, 5000);
 }
 
-// --- CRITICAL: THE EXPORT LIST ---
-module.exports = { 
-    startScanner, 
-    startRadar, 
-    startListener, 
-    sendTelegram, // <-- This allows index.js to use the function
-    getHotlist: () => hotlist 
-};
+module.exports = { startScanner, startRadar, startListener, sendTelegram, getHotlist: () => hotlist };
