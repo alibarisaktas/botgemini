@@ -17,13 +17,15 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Error:", e.message); }
 }
 
-// Stage A - Universe Filter (Same as before)
+// Stage A - Universe Filter (Updated to exclude stablecoins)
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
         const tickers = JSON.parse(data);
         const filtered = tickers
-            .filter(t => t.s.endsWith('USDT') && !['BTCUSDT', 'ETHUSDT', 'BNBUSDT'].includes(t.s))
+            .filter(t => t.s.endsWith('USDT')) 
+            // Exclude Majors and Stables
+            .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT'].includes(t.s))
             .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
             .map(t => t.s);
 
