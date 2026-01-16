@@ -5,7 +5,8 @@ let tradeStore = {};
 let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
-let lastUpdateId = 0; // The "Bookmark" for Telegram messages
+let lastUpdateId = 0;
+const bootTime = Date.now();
 
 // --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
@@ -76,14 +77,24 @@ function startScanner() {
     });
 }
 
-// --- STAGE B: COLLECTING ---
+// --- STAGE B: COLLECTING (SAFETY FIX APPLIED) ---
 function startCollector() {
-    if (collectorWs) collectorWs.terminate();
+    if (collectorWs) {
+        try {
+            // Safety: Check if the socket is actually open or connecting before trying to kill it
+            if (collectorWs.readyState === WebSocket.OPEN || collectorWs.readyState === WebSocket.CONNECTING) {
+                collectorWs.terminate();
+            }
+        } catch (e) { console.log("⚠️ Connection cleanup skipped."); }
+    }
+    
     if (hotlist.length === 0) return;
     
     const streams = hotlist.slice(0, 50).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
+    collectorWs.on('error', (err) => console.error("Collector WS Error:", err.message));
+
     collectorWs.on('message', (msg) => {
         try {
             const parsed = JSON.parse(msg);
@@ -97,6 +108,7 @@ function startCollector() {
                 t: Date.now() 
             });
 
+            // Cleanup 3h old data
             const cutoff = Date.now() - (3 * 3600000);
             if (tradeStore[data.s].length > 500) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
@@ -133,7 +145,7 @@ function startRadar() {
     }, 30000);
 }
 
-// --- LISTENER: /check COMMAND (WITH SPAM FIX) ---
+// --- LISTENER: /check & /status ---
 function startListener() {
     console.log("📥 Telegram Listener Active...");
     setInterval(async () => {
@@ -143,27 +155,46 @@ function startListener() {
 
             if (data.ok && data.result.length > 0) {
                 for (const update of data.result) {
-                    lastUpdateId = update.update_id; // Mark as read
+                    lastUpdateId = update.update_id; 
 
                     const msg = update.message || update.channel_post;
-                    if (!msg || !msg.text || !msg.text.startsWith('/check')) continue;
+                    if (!msg || !msg.text) continue;
 
-                    let symbol = msg.text.split(' ')[1]?.toUpperCase();
-                    if (!symbol) continue;
-                    if (!symbol.endsWith('USDT')) symbol += 'USDT';
-
-                    const stats = analyzeSymbol(symbol);
-                    if (!stats) {
-                        sendTelegram(`❌ No recent data for ${symbol}. (Requires 10m history)`);
+                    // COMMAND: /status
+                    if (msg.text.startsWith('/status')) {
+                        const uptimeHrs = ((Date.now() - bootTime) / 3600000).toFixed(1);
+                        const totalCached = Object.values(tradeStore).reduce((a, b) => a + b.length, 0);
+                        
+                        sendTelegram(
+                            `🤖 *Flow Radar System Status*\n` +
+                            `--- --- ---\n` +
+                            `⏱ Uptime: ${uptimeHrs} hours\n` +
+                            `🔥 Monitoring: ${hotlist.length} symbols\n` +
+                            `💾 Total trades in RAM: ${totalCached.toLocaleString()}\n` +
+                            `✅ System health: Stable`
+                        );
                         continue;
                     }
 
-                    sendTelegram(
-                        `🔍 *Manual Check: ${symbol}*\n` +
-                        `Current State: ${stats.label}\n` +
-                        `10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
-                        `Bias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`
-                    );
+                    // COMMAND: /check
+                    if (msg.text.startsWith('/check')) {
+                        let symbol = msg.text.split(' ')[1]?.toUpperCase();
+                        if (!symbol) continue;
+                        if (!symbol.endsWith('USDT')) symbol += 'USDT';
+
+                        const stats = analyzeSymbol(symbol);
+                        if (!stats) {
+                            sendTelegram(`❌ No recent data for ${symbol}. (Need 10m history)`);
+                            continue;
+                        }
+
+                        sendTelegram(
+                            `🔍 *Manual Check: ${symbol}*\n` +
+                            `Current State: ${stats.label}\n` +
+                            `10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
+                            `Bias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`
+                        );
+                    }
                 }
             }
         } catch (e) { console.error("Listener Error:", e.message); }
