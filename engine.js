@@ -20,7 +20,7 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Send Error:", e.message); }
 }
 
-// --- LOGIC: ANALYSIS ---
+// --- LOGIC: ANALYSIS ENGINE ---
 function analyzeSymbol(s) {
     const now = Date.now();
     const trades = tradeStore[s] || [];
@@ -76,6 +76,8 @@ function startScanner() {
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
+    
+    ws.on('close', () => setTimeout(startScanner, 5000));
 }
 
 // --- STAGE B: COLLECTOR ---
@@ -108,6 +110,8 @@ function startCollector() {
             }
         } catch (e) {}
     });
+
+    collectorWs.on('close', () => setTimeout(startCollector, 5000));
 }
 
 // --- RADAR: ALERTS ---
