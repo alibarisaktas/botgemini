@@ -24,8 +24,6 @@ async function sendTelegram(text) {
 function analyzeSymbol(s) {
     const now = Date.now();
     const data = tradeStore[s];
-    
-    // Safety: If no trades recorded yet, skip
     if (!data || !data.trades || data.trades.length < 5) return null;
 
     const trades = data.trades;
@@ -33,25 +31,20 @@ function analyzeSymbol(s) {
     const base = trades.filter(t => t.t > now - 10800000); // 3h
     const hourAgo = trades.filter(t => t.t > now - 3600000); // 1h
 
-    // --- Volume & Bias ---
     const fBuy = fast.filter(t => t.side === 'BUY').reduce((a, b) => a + b.usd, 0);
     const fSell = fast.filter(t => t.side === 'SELL').reduce((a, b) => a + b.usd, 0);
     const totalFast = fBuy + fSell;
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
 
-    // --- Activity ---
     const fActivity = fast.length / 10;
     const bActivity = base.length / 180;
     const actMult = bActivity > 0 ? (fActivity / bActivity) : 1;
 
-    // --- 1H Price Change (With Safety Guard) ---
     let change1h = 0;
     if (hourAgo.length > 0 && hourAgo[0]) {
         const oldPrice = hourAgo[0].p; 
         const currentPrice = data.lastPrice;
-        if (oldPrice > 0) {
-            change1h = ((currentPrice - oldPrice) / oldPrice) * 100;
-        }
+        if (oldPrice > 0) change1h = ((currentPrice - oldPrice) / oldPrice) * 100;
     }
 
     let label = "⚖️ MIXED TAPE";
@@ -76,16 +69,24 @@ function startScanner() {
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
+                console.log(`🔥 Scanner: Watchlist size ${hotlist.length}`);
                 startCollector();
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
-// --- STAGE B: COLLECTOR ---
+// --- STAGE B: COLLECTOR (The Crash Fix) ---
 function startCollector() {
+    // 1. SAFE TERMINATION: Check state before killing connection
     if (collectorWs) {
-        try { collectorWs.terminate(); } catch (e) {}
+        try {
+            // Only terminate if it's actually OPEN or CONNECTING
+            if (collectorWs.readyState === WebSocket.OPEN || collectorWs.readyState === WebSocket.CONNECTING) {
+                collectorWs.removeAllListeners(); // Prevent old errors from triggering
+                collectorWs.terminate();
+            }
+        } catch (e) { console.log("⚠️ Safe Cleanup: Handled termination race."); }
     }
     
     if (hotlist.length === 0) return;
@@ -93,15 +94,21 @@ function startCollector() {
     const streams = hotlist.slice(0, 40).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
+    // 2. ERROR CATCHING: This stops the "Unhandled error event" crash
+    collectorWs.on('error', (err) => {
+        if (err.message.includes('closed before the connection was established')) {
+            return; // Ignore this specific race condition error
+        }
+        console.error("Collector WS Error:", err.message);
+    });
+
     collectorWs.on('message', (msg) => {
         try {
             const parsed = JSON.parse(msg);
             const data = parsed.data || parsed;
             if (!data || !data.s) return;
             
-            if (!tradeStore[data.s]) {
-                tradeStore[data.s] = { trades: [], lastPrice: 0 };
-            }
+            if (!tradeStore[data.s]) tradeStore[data.s] = { trades: [], lastPrice: 0 };
 
             const price = parseFloat(data.p);
             tradeStore[data.s].lastPrice = price;
@@ -119,34 +126,24 @@ function startCollector() {
         } catch (e) {}
     });
 
-    collectorWs.on('close', () => setTimeout(startCollector, 5000));
+    collectorWs.on('close', () => {
+        console.log("📡 Stream closed. Reconnecting in 5s...");
+        setTimeout(startCollector, 5000);
+    });
 }
 
-// --- RADAR: ALERTS ---
+// --- RADAR & LISTENER ---
 function startRadar() {
     setInterval(() => {
         hotlist.forEach(s => {
             const stats = analyzeSymbol(s);
             if (!stats || stats.label === "⚖️ MIXED TAPE") return;
-
             const now = Date.now();
             if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
-
-            const isNewState = stats.label !== stateMemory[s].lastLabel;
-            const cooldownDone = now - stateMemory[s].lastAlert > 1500000;
-
-            if (isNewState || cooldownDone) {
+            if (stats.label !== stateMemory[s].lastLabel || now - stateMemory[s].lastAlert > 1500000) {
                 const priceStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
                 const changeStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
-                
-                sendTelegram(
-                    `*${s}* | ${stats.label}\n` +
-                    `💵 Price: $${priceStr} (${changeStr} 1h)\n` +
-                    `💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
-                    `📊 Bias: ${stats.fBias.toFixed(1)}%\n` +
-                    `⚡ Activity: ${stats.actMult.toFixed(1)}x`
-                );
-                
+                sendTelegram(`*${s}* | ${stats.label}\n💵 Price: $${priceStr} (${changeStr} 1h)\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
                 stateMemory[s].lastLabel = stats.label;
                 stateMemory[s].lastAlert = now;
             }
@@ -154,7 +151,6 @@ function startRadar() {
     }, 30000);
 }
 
-// --- LISTENER: COMMANDS ---
 function startListener() {
     setInterval(async () => {
         try {
