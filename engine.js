@@ -6,6 +6,7 @@ let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
 let lastUpdateId = 0; 
+let collectorTimeout = null; // Used for Debouncing
 
 // --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
@@ -56,7 +57,7 @@ function analyzeSymbol(s) {
     return { label, note, fBias, actMult, totalFast };
 }
 
-// --- STAGE A: FILTERING ---
+// --- STAGE A: FILTERING (WITH DEBOUNCE) ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
@@ -70,21 +71,26 @@ function startScanner() {
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
-                console.log(`🔥 Scanner: Watching ${hotlist.length} active pairs.`);
-                startCollector();
+                console.log(`🔥 Scanner: Watchlist updated (${hotlist.length} pairs).`);
+                
+                // DEBOUNCE FIX: Wait 2 seconds for market calm before restarting collector
+                clearTimeout(collectorTimeout);
+                collectorTimeout = setTimeout(() => {
+                    startCollector();
+                }, 2000);
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
-// --- STAGE B: COLLECTING (Safe Refresh) ---
+// --- STAGE B: COLLECTING (SAFE) ---
 function startCollector() {
     if (collectorWs) {
         try {
-            if (collectorWs.readyState === WebSocket.OPEN || collectorWs.readyState === WebSocket.CONNECTING) {
+            if (collectorWs.readyState !== WebSocket.CLOSED) {
                 collectorWs.terminate();
             }
-        } catch (e) { console.log("⚠️ Collector refresh note: Cleaned up connection."); }
+        } catch (e) { console.log("⚠️ Collector cleanup performed."); }
     }
     
     if (hotlist.length === 0) return;
@@ -92,7 +98,7 @@ function startCollector() {
     const streams = hotlist.slice(0, 50).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
-    collectorWs.on('error', (err) => console.error("Collector WS Error:", err.message));
+    collectorWs.on('error', (err) => console.error("Collector WS Log:", err.message));
 
     collectorWs.on('message', (msg) => {
         try {
@@ -107,9 +113,8 @@ function startCollector() {
                 t: Date.now() 
             });
 
-            // MEMORY PROTECTION: Auto-trim to 3 hours
             const cutoff = Date.now() - (3 * 3600000);
-            if (tradeStore[data.s].length > 200) {
+            if (tradeStore[data.s].length > 100) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
             }
         } catch (e) {}
