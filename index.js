@@ -1,12 +1,16 @@
 const engine = require('./engine');
 const config = require('./config');
 
-console.log("🚀 Starting Flow Radar...");
+console.log("🚀 System Booting...");
 
+// Start core processes
 engine.startScanner();
 engine.startRadar();
 
-// Heartbeat
+// Send initial startup signal
+engine.sendTelegram("🟢 *Flow Radar Online*\nSystem has successfully connected to Binance.");
+
+// Heartbeat Loop
 setInterval(() => {
-    engine.sendTelegram(`🟡 *Flow Radar Heartbeat*\nPairs: ${engine.getHotlist().length}\nStatus: Running ✅`);
+    engine.sendTelegram(`🟡 *Heartbeat*\nMonitoring: ${engine.getHotlist().length} pairs\nStatus: Running ✅`);
 }, config.HEARTBEAT_HOURS * 3600000);
