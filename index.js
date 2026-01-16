@@ -4,7 +4,7 @@ const config = require('./config');
 
 console.log("🚀 System Booting...");
 
-// Health Check Server for Railway
+// Health Check Server (Keeps Railway alive)
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Flow Radar is Active ✅');
@@ -20,8 +20,8 @@ try {
     engine.startRadar();
     engine.startListener();
     
-    // Test Telegram Connection
-    engine.sendTelegram("🟢 *Flow Radar Online*\nLogic: High Conviction ($100k+)\nStablecoins: Filtered 🛡️");
+    // Now engine.sendTelegram will work!
+    engine.sendTelegram("🟢 *Flow Radar Online*\nHigh-Conviction Logic ($100k+) active.\nStablecoins: Filtered 🛡️");
 } catch (err) {
     console.error("❌ Startup Error:", err.message);
 }
