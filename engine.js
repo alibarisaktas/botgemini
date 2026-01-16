@@ -6,9 +6,9 @@ let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
 let lastUpdateId = 0; 
-let collectorTimeout = null; // Used for Debouncing
+let collectorTimeout = null; 
 
-// --- TELEGRAM OUTBOUND ---
+// --- 1. TELEGRAM OUTBOUND (The Missing Function) ---
 async function sendTelegram(text) {
     if (!config.TG_TOKEN || !config.TG_CHAT_ID) return;
     try {
@@ -20,7 +20,7 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Send Error:", e.message); }
 }
 
-// --- LOGIC: ANALYSIS ENGINE ---
+// --- 2. LOGIC: ANALYSIS ENGINE ---
 function analyzeSymbol(s) {
     const now = Date.now();
     const trades = tradeStore[s] || [];
@@ -57,7 +57,7 @@ function analyzeSymbol(s) {
     return { label, note, fBias, actMult, totalFast };
 }
 
-// --- STAGE A: FILTERING (WITH DEBOUNCE) ---
+// --- 3. STAGE A: FILTERING ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
@@ -73,7 +73,6 @@ function startScanner() {
                 hotlist = filtered;
                 console.log(`🔥 Scanner: Watchlist updated (${hotlist.length} pairs).`);
                 
-                // DEBOUNCE FIX: Wait 2 seconds for market calm before restarting collector
                 clearTimeout(collectorTimeout);
                 collectorTimeout = setTimeout(() => {
                     startCollector();
@@ -83,7 +82,7 @@ function startScanner() {
     });
 }
 
-// --- STAGE B: COLLECTING (SAFE) ---
+// --- 4. STAGE B: COLLECTING ---
 function startCollector() {
     if (collectorWs) {
         try {
@@ -121,7 +120,7 @@ function startCollector() {
     });
 }
 
-// --- RADAR: ALERTS ---
+// --- 5. RADAR: ALERTS ---
 function startRadar() {
     setInterval(() => {
         hotlist.forEach(s => {
@@ -149,7 +148,7 @@ function startRadar() {
     }, 30000);
 }
 
-// --- LISTENER: COMMANDS ---
+// --- 6. LISTENER: COMMANDS ---
 function startListener() {
     console.log("📥 Telegram Listener Active...");
     setInterval(async () => {
@@ -193,4 +192,11 @@ function startListener() {
     }, 5000);
 }
 
-module.exports = { startScanner, startRadar, startListener };
+// --- CRITICAL: THE EXPORT LIST ---
+module.exports = { 
+    startScanner, 
+    startRadar, 
+    startListener, 
+    sendTelegram, // <-- This allows index.js to use the function
+    getHotlist: () => hotlist 
+};
