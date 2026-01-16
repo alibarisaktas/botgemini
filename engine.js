@@ -5,8 +5,7 @@ let tradeStore = {};
 let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
-let lastUpdateId = 0;
-const bootTime = Date.now();
+let lastUpdateId = 0; 
 
 // --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
@@ -32,6 +31,7 @@ function analyzeSymbol(s) {
     const fBuy = fast.filter(t => t.side === 'BUY').reduce((a, b) => a + b.usd, 0);
     const fSell = fast.filter(t => t.side === 'SELL').reduce((a, b) => a + b.usd, 0);
     const totalFast = fBuy + fSell;
+    
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
     const fActivity = fast.length / 10;
     const bActivity = base.length / 180;
@@ -70,22 +70,21 @@ function startScanner() {
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
-                console.log(`🔥 Stage A Updated: ${hotlist.length} symbols.`);
+                console.log(`🔥 Scanner: Watching ${hotlist.length} active pairs.`);
                 startCollector();
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
-// --- STAGE B: COLLECTING (SAFETY FIX APPLIED) ---
+// --- STAGE B: COLLECTING (Safe Refresh) ---
 function startCollector() {
     if (collectorWs) {
         try {
-            // Safety: Check if the socket is actually open or connecting before trying to kill it
             if (collectorWs.readyState === WebSocket.OPEN || collectorWs.readyState === WebSocket.CONNECTING) {
                 collectorWs.terminate();
             }
-        } catch (e) { console.log("⚠️ Connection cleanup skipped."); }
+        } catch (e) { console.log("⚠️ Collector refresh note: Cleaned up connection."); }
     }
     
     if (hotlist.length === 0) return;
@@ -108,9 +107,9 @@ function startCollector() {
                 t: Date.now() 
             });
 
-            // Cleanup 3h old data
+            // MEMORY PROTECTION: Auto-trim to 3 hours
             const cutoff = Date.now() - (3 * 3600000);
-            if (tradeStore[data.s].length > 500) {
+            if (tradeStore[data.s].length > 200) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
             }
         } catch (e) {}
@@ -145,7 +144,7 @@ function startRadar() {
     }, 30000);
 }
 
-// --- LISTENER: /check & /status ---
+// --- LISTENER: COMMANDS ---
 function startListener() {
     console.log("📥 Telegram Listener Active...");
     setInterval(async () => {
@@ -159,41 +158,29 @@ function startListener() {
 
                     const msg = update.message || update.channel_post;
                     if (!msg || !msg.text) continue;
+                    const text = msg.text.trim();
 
-                    // COMMAND: /status
-                    if (msg.text.startsWith('/status')) {
-                        const uptimeHrs = ((Date.now() - bootTime) / 3600000).toFixed(1);
-                        const totalCached = Object.values(tradeStore).reduce((a, b) => a + b.length, 0);
-                        
+                    if (text === '/status') {
+                        const memoryMB = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
                         sendTelegram(
-                            `🤖 *Flow Radar System Status*\n` +
-                            `--- --- ---\n` +
-                            `⏱ Uptime: ${uptimeHrs} hours\n` +
-                            `🔥 Monitoring: ${hotlist.length} symbols\n` +
-                            `💾 Total trades in RAM: ${totalCached.toLocaleString()}\n` +
-                            `✅ System health: Stable`
+                            `🤖 *Bot Health Status*\n` +
+                            `⏱ Uptime: ${Math.floor(process.uptime() / 60)} mins\n` +
+                            `📁 Tracked Coins: ${Object.keys(tradeStore).length}\n` +
+                            `🧠 Memory: ${memoryMB} MB\n` +
+                            `🔥 Scanner: ${hotlist.length} pairs`
                         );
-                        continue;
                     }
 
-                    // COMMAND: /check
-                    if (msg.text.startsWith('/check')) {
-                        let symbol = msg.text.split(' ')[1]?.toUpperCase();
+                    if (text.startsWith('/check')) {
+                        let symbol = text.split(' ')[1]?.toUpperCase();
                         if (!symbol) continue;
                         if (!symbol.endsWith('USDT')) symbol += 'USDT';
-
                         const stats = analyzeSymbol(symbol);
                         if (!stats) {
-                            sendTelegram(`❌ No recent data for ${symbol}. (Need 10m history)`);
+                            sendTelegram(`❌ No data for ${symbol}. (Warming up...)`);
                             continue;
                         }
-
-                        sendTelegram(
-                            `🔍 *Manual Check: ${symbol}*\n` +
-                            `Current State: ${stats.label}\n` +
-                            `10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
-                            `Bias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`
-                        );
+                        sendTelegram(`🔍 *Manual Check: ${symbol}*\nState: ${stats.label}\nBias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`);
                     }
                 }
             }
@@ -201,10 +188,4 @@ function startListener() {
     }, 5000);
 }
 
-module.exports = { 
-    startScanner, 
-    startRadar, 
-    startListener, 
-    sendTelegram,
-    getHotlist: () => hotlist 
-};
+module.exports = { startScanner, startRadar, startListener };
