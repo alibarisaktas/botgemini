@@ -1,0 +1,9 @@
+module.exports = {
+    TG_TOKEN: "8240232911:AAH6PYxoJAH_1RMm3BIeP2Is9zdqChsC4Lk",
+    TG_CHAT_ID: "-1003664179711",
+    SCAN_INTERVAL_SEC: 60,
+    ALERT_COOLDOWN_MIN: 25,
+    HEARTBEAT_HOURS: 3,
+    MIN_VOLUME_USDT: 1000000, // $1M 24h vol
+    WHALE_THRESHOLD_USD: 50000 // $50k single trade aggression
+};
