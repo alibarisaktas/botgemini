@@ -5,6 +5,7 @@ let tradeStore = {};
 let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
+let lastUpdateId = 0; // The "Bookmark" for Telegram messages
 
 // --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
@@ -54,7 +55,7 @@ function analyzeSymbol(s) {
     return { label, note, fBias, actMult, totalFast };
 }
 
-// --- STAGE A: FILTERING (No Stablecoins) ---
+// --- STAGE A: FILTERING ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
@@ -62,14 +63,13 @@ function startScanner() {
             const tickers = JSON.parse(data);
             const filtered = tickers
                 .filter(t => t.s.endsWith('USDT'))
-                // HARD FILTER: Removes Stables seen in your Screenshot 12
                 .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'GBPUSDT'].includes(t.s))
                 .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
                 .map(t => t.s);
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
-                console.log(`🔥 Watchlist updated: ${hotlist.length} symbols.`);
+                console.log(`🔥 Stage A Updated: ${hotlist.length} symbols.`);
                 startCollector();
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
@@ -97,7 +97,6 @@ function startCollector() {
                 t: Date.now() 
             });
 
-            // Cleanup 3h old data
             const cutoff = Date.now() - (3 * 3600000);
             if (tradeStore[data.s].length > 500) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
@@ -134,38 +133,43 @@ function startRadar() {
     }, 30000);
 }
 
-// --- LISTENER: /check COMMAND ---
+// --- LISTENER: /check COMMAND (WITH SPAM FIX) ---
 function startListener() {
+    console.log("📥 Telegram Listener Active...");
     setInterval(async () => {
         try {
-            const res = await fetch(`https://api.telegram.org/bot${config.TG_TOKEN}/getUpdates?offset=-1`);
+            const res = await fetch(`https://api.telegram.org/bot${config.TG_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=10`);
             const data = await res.json();
-            if (!data.result || data.result.length === 0) return;
 
-            const msg = data.result[0].message;
-            if (!msg || !msg.text || !msg.text.startsWith('/check')) return;
+            if (data.ok && data.result.length > 0) {
+                for (const update of data.result) {
+                    lastUpdateId = update.update_id; // Mark as read
 
-            let symbol = msg.text.split(' ')[1]?.toUpperCase();
-            if (!symbol) return;
-            if (!symbol.endsWith('USDT')) symbol += 'USDT';
+                    const msg = update.message || update.channel_post;
+                    if (!msg || !msg.text || !msg.text.startsWith('/check')) continue;
 
-            const stats = analyzeSymbol(symbol);
-            if (!stats) {
-                sendTelegram(`❌ No data for ${symbol}. (Requires 10m history)`);
-                return;
+                    let symbol = msg.text.split(' ')[1]?.toUpperCase();
+                    if (!symbol) continue;
+                    if (!symbol.endsWith('USDT')) symbol += 'USDT';
+
+                    const stats = analyzeSymbol(symbol);
+                    if (!stats) {
+                        sendTelegram(`❌ No recent data for ${symbol}. (Requires 10m history)`);
+                        continue;
+                    }
+
+                    sendTelegram(
+                        `🔍 *Manual Check: ${symbol}*\n` +
+                        `Current State: ${stats.label}\n` +
+                        `10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
+                        `Bias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`
+                    );
+                }
             }
-
-            sendTelegram(
-                `🔍 *Manual Check: ${symbol}*\n` +
-                `Current State: ${stats.label}\n` +
-                `10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
-                `Bias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`
-            );
-        } catch (e) {}
+        } catch (e) { console.error("Listener Error:", e.message); }
     }, 5000);
 }
 
-// --- EXPORTS (CRITICAL FIX) ---
 module.exports = { 
     startScanner, 
     startRadar, 
