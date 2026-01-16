@@ -6,6 +6,7 @@ let hotlist = [];
 let collectorWs = null;
 let stateMemory = {}; 
 
+// --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
     if (!config.TG_TOKEN || !config.TG_CHAT_ID) return;
     try {
@@ -17,6 +18,7 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Send Error:", e.message); }
 }
 
+// --- LOGIC: ANALYSIS ENGINE ---
 function analyzeSymbol(s) {
     const now = Date.now();
     const trades = tradeStore[s] || [];
@@ -52,24 +54,29 @@ function analyzeSymbol(s) {
     return { label, note, fBias, actMult, totalFast };
 }
 
+// --- STAGE A: FILTERING (No Stablecoins) ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
-        const tickers = JSON.parse(data);
-        const filtered = tickers
-            .filter(t => t.s.endsWith('USDT'))
-            .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT'].includes(t.s))
-            .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
-            .map(t => t.s);
+        try {
+            const tickers = JSON.parse(data);
+            const filtered = tickers
+                .filter(t => t.s.endsWith('USDT'))
+                // HARD FILTER: Removes Stables seen in your Screenshot 12
+                .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'GBPUSDT'].includes(t.s))
+                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
+                .map(t => t.s);
 
-        if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
-            hotlist = filtered;
-            console.log(`🔥 Stage A: Hotlist updated (${hotlist.length} symbols).`);
-            startCollector();
-        }
+            if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
+                hotlist = filtered;
+                console.log(`🔥 Watchlist updated: ${hotlist.length} symbols.`);
+                startCollector();
+            }
+        } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
+// --- STAGE B: COLLECTING ---
 function startCollector() {
     if (collectorWs) collectorWs.terminate();
     if (hotlist.length === 0) return;
@@ -78,24 +85,28 @@ function startCollector() {
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
     collectorWs.on('message', (msg) => {
-        const parsed = JSON.parse(msg);
-        const data = parsed.data || parsed;
-        if (!data || !data.s) return;
-        
-        if (!tradeStore[data.s]) tradeStore[data.s] = [];
-        tradeStore[data.s].push({ 
-            usd: parseFloat(data.p) * parseFloat(data.q), 
-            side: data.m ? 'SELL' : 'BUY', 
-            t: Date.now() 
-        });
+        try {
+            const parsed = JSON.parse(msg);
+            const data = parsed.data || parsed;
+            if (!data || !data.s) return;
+            
+            if (!tradeStore[data.s]) tradeStore[data.s] = [];
+            tradeStore[data.s].push({ 
+                usd: parseFloat(data.p) * parseFloat(data.q), 
+                side: data.m ? 'SELL' : 'BUY', 
+                t: Date.now() 
+            });
 
-        if (tradeStore[data.s].length > 1000) {
+            // Cleanup 3h old data
             const cutoff = Date.now() - (3 * 3600000);
-            tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
-        }
+            if (tradeStore[data.s].length > 500) {
+                tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
+            }
+        } catch (e) {}
     });
 }
 
+// --- RADAR: ALERTS ---
 function startRadar() {
     setInterval(() => {
         hotlist.forEach(s => {
@@ -106,4 +117,59 @@ function startRadar() {
             if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
 
             const isNewState = stats.label !== stateMemory[s].lastLabel;
-            const cooldownDone = now - stateMemory[s].lastAlert > config.ALERT_COOLDOWN_MIN * 60000
+            const cooldownDone = now - stateMemory[s].lastAlert > (config.ALERT_COOLDOWN_MIN || 25) * 60000;
+
+            if (isNewState || cooldownDone) {
+                sendTelegram(
+                    `*${s}* | ${stats.label}\n` +
+                    `💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
+                    `📊 Buy Bias: ${stats.fBias.toFixed(1)}%\n` +
+                    `⚡ Activity: ${stats.actMult.toFixed(1)}x normal\n` +
+                    `📝 _${stats.note}_`
+                );
+                stateMemory[s].lastLabel = stats.label;
+                stateMemory[s].lastAlert = now;
+            }
+        });
+    }, 30000);
+}
+
+// --- LISTENER: /check COMMAND ---
+function startListener() {
+    setInterval(async () => {
+        try {
+            const res = await fetch(`https://api.telegram.org/bot${config.TG_TOKEN}/getUpdates?offset=-1`);
+            const data = await res.json();
+            if (!data.result || data.result.length === 0) return;
+
+            const msg = data.result[0].message;
+            if (!msg || !msg.text || !msg.text.startsWith('/check')) return;
+
+            let symbol = msg.text.split(' ')[1]?.toUpperCase();
+            if (!symbol) return;
+            if (!symbol.endsWith('USDT')) symbol += 'USDT';
+
+            const stats = analyzeSymbol(symbol);
+            if (!stats) {
+                sendTelegram(`❌ No data for ${symbol}. (Requires 10m history)`);
+                return;
+            }
+
+            sendTelegram(
+                `🔍 *Manual Check: ${symbol}*\n` +
+                `Current State: ${stats.label}\n` +
+                `10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
+                `Bias: ${stats.fBias.toFixed(1)}% | Activity: ${stats.actMult.toFixed(1)}x`
+            );
+        } catch (e) {}
+    }, 5000);
+}
+
+// --- EXPORTS (CRITICAL FIX) ---
+module.exports = { 
+    startScanner, 
+    startRadar, 
+    startListener, 
+    sendTelegram,
+    getHotlist: () => hotlist 
+};
