@@ -66,7 +66,7 @@ function startScanner() {
             const filtered = tickers
                 .filter(t => t.s.endsWith('USDT'))
                 .filter(t => !['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'DAIUSDT', 'EURUSDT', 'GBPUSDT'].includes(t.s))
-                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > 1000000)
+                .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > (config.MIN_VOLUME_USDT || 1000000))
                 .map(t => t.s);
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
@@ -102,6 +102,7 @@ function startCollector() {
                 t: Date.now() 
             });
 
+            // Keep memory light (3 hour cutoff)
             const cutoff = Date.now() - (3 * 3600000);
             if (tradeStore[data.s].length > 100) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
@@ -121,7 +122,7 @@ function startRadar() {
             if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
 
             const isNewState = stats.label !== stateMemory[s].lastLabel;
-            const cooldownDone = now - stateMemory[s].lastAlert > 1500000; // 25 min
+            const cooldownDone = now - stateMemory[s].lastAlert > (config.ALERT_COOLDOWN_MIN || 25) * 60000;
 
             if (isNewState || cooldownDone) {
                 sendTelegram(`*${s}* | ${stats.label}\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
