@@ -5,6 +5,7 @@ let tradeStore = {};
 let hotlist = [];
 let collectorWs = null;
 let lastLogTime = 0;
+const cooldowns = {};
 
 async function sendTelegram(text) {
     if (!config.TG_TOKEN || !config.TG_CHAT_ID) return;
@@ -28,7 +29,7 @@ function startScanner() {
 
         if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
             hotlist = filtered;
-            console.log(`🔥 Stage A: Hotlist refreshed. ${hotlist.length} symbols.`);
+            console.log(`🔥 Stage A: Hotlist updated (${hotlist.length} symbols).`);
             startCollector();
         }
     });
@@ -50,7 +51,6 @@ function startCollector() {
         else tradeStore[data.s].b += usd;
         tradeStore[data.s].p = data.p;
 
-        // --- STAGE B VERIFICATION LOG ---
         const now = Date.now();
         if (config.DEBUG_MODE && (now - lastLogTime > config.LOG_THROTTLE_MS)) {
             console.log(`✅ Stage B Active: Catching trades for ${data.s} ($${usd.toFixed(0)})`);
@@ -58,7 +58,7 @@ function startCollector() {
         }
     });
 
-    collectorWs.on('open', () => console.log("📡 Stage B: WebSocket Connected to Binance Streams"));
+    collectorWs.on('open', () => console.log("📡 Stage B: WebSocket Connected."));
 }
 
 function startRadar() {
