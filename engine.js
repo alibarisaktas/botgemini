@@ -1,5 +1,7 @@
 const WebSocket = require('ws');
-const config = require('./config');
+
+// Note: Using fetch from global or requiring it if on older Node
+// But Railway Node 18+ has it global.
 
 let tradeStore = {}; 
 let hotlist = [];
@@ -8,7 +10,9 @@ let stateMemory = {};
 let lastUpdateId = 0; 
 let startTime = Date.now();
 
-// --- TELEGRAM OUTBOUND ---
+// We'll require config inside functions to ensure it's loaded
+const config = require('./config');
+
 async function sendTelegram(text) {
     if (!config.TG_TOKEN || !config.TG_CHAT_ID) return;
     try {
@@ -20,7 +24,6 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Send Error:", e.message); }
 }
 
-// --- LOGIC: ANALYSIS ENGINE ---
 function analyzeSymbol(s) {
     const now = Date.now();
     const trades = tradeStore[s] || [];
@@ -57,7 +60,6 @@ function analyzeSymbol(s) {
     return { label, note, fBias, actMult, totalFast };
 }
 
-// --- STAGE A: FILTERING ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
@@ -71,14 +73,13 @@ function startScanner() {
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
-                console.log(`🔥 Scanner: Watchlist updated (${hotlist.length} pairs).`);
+                console.log(`🔥 Scanner: Watchlist size ${hotlist.length}`);
                 startCollector();
             }
         } catch (e) { console.error("Scanner Error:", e.message); }
     });
 }
 
-// --- STAGE B: COLLECTING (Stable Model) ---
 function startCollector() {
     if (collectorWs) {
         try { collectorWs.terminate(); } catch (e) {}
@@ -102,7 +103,6 @@ function startCollector() {
                 t: Date.now() 
             });
 
-            // Keep memory light
             const cutoff = Date.now() - (3 * 3600000);
             if (tradeStore[data.s].length > 100) {
                 tradeStore[data.s] = tradeStore[data.s].filter(t => t.t > cutoff);
@@ -111,7 +111,6 @@ function startCollector() {
     });
 }
 
-// --- RADAR: ALERTS ---
 function startRadar() {
     setInterval(() => {
         hotlist.forEach(s => {
@@ -122,7 +121,7 @@ function startRadar() {
             if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
 
             const isNewState = stats.label !== stateMemory[s].lastLabel;
-            const cooldownDone = now - stateMemory[s].lastAlert > 1500000; // 25 min
+            const cooldownDone = now - stateMemory[s].lastAlert > 1500000;
 
             if (isNewState || cooldownDone) {
                 sendTelegram(`*${s}* | ${stats.label}\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
@@ -133,7 +132,6 @@ function startRadar() {
     }, 30000);
 }
 
-// --- LISTENER: COMMANDS ---
 function startListener() {
     setInterval(async () => {
         try {
