@@ -1,11 +1,10 @@
 const WebSocket = require('ws');
 const config = require('./config');
 
-let tradeStore = {};
+let tradeStore = {}; // Now stores: { 'SOLUSDT': [{p, q, usd, side, t}, ...] }
 let hotlist = [];
 let collectorWs = null;
-let lastLogTime = 0;
-const cooldowns = {};
+let stateMemory = {}; // Tracks: { 'SOLUSDT': { lastLabel: '', lastAlert: 0 } }
 
 async function sendTelegram(text) {
     if (!config.TG_TOKEN || !config.TG_CHAT_ID) return;
@@ -18,6 +17,7 @@ async function sendTelegram(text) {
     } catch (e) { console.error("TG Error:", e.message); }
 }
 
+// Stage A - Universe Filter (Same as before)
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
     ws.on('message', (data) => {
@@ -35,6 +35,7 @@ function startScanner() {
     });
 }
 
+// Stage B - Aggressive Flow Capture
 function startCollector() {
     if (collectorWs) collectorWs.terminate();
     if (hotlist.length === 0) return;
@@ -44,41 +45,83 @@ function startCollector() {
     
     collectorWs.on('message', (msg) => {
         const { data } = JSON.parse(msg);
-        if (!tradeStore[data.s]) tradeStore[data.s] = { b: 0, s: 0, p: 0 };
-        const usd = parseFloat(data.p) * parseFloat(data.q);
+        if (!tradeStore[data.s]) tradeStore[data.s] = [];
         
-        if (data.m) tradeStore[data.s].s += usd; 
-        else tradeStore[data.s].b += usd;
-        tradeStore[data.s].p = data.p;
+        const usd = parseFloat(data.p) * parseFloat(data.q);
+        const side = data.m ? 'SELL' : 'BUY'; // m=true means maker was buyer -> aggressive SELL
+        
+        tradeStore[data.s].push({ usd, side, t: Date.now(), p: data.p });
 
-        const now = Date.now();
-        if (config.DEBUG_MODE && (now - lastLogTime > config.LOG_THROTTLE_MS)) {
-            console.log(`✅ Stage B Active: Catching trades for ${data.s} ($${usd.toFixed(0)})`);
-            lastLogTime = now;
+        // Clean memory: remove trades older than 3 hours (Baseline window)
+        const threeHoursAgo = Date.now() - (3 * 3600000);
+        if (tradeStore[data.s].length % 100 === 0) { // Clean every 100 trades
+            tradeStore[data.s] = tradeStore[data.s].filter(tr => tr.t > threeHoursAgo);
         }
     });
-
-    collectorWs.on('open', () => console.log("📡 Stage B: WebSocket Connected."));
 }
 
+// Flow Radar - 3 Window Analysis
 function startRadar() {
     setInterval(() => {
+        const now = Date.now();
         hotlist.forEach(s => {
-            const d = tradeStore[s];
-            if (!d || (d.b + d.s) === 0) return;
-            const bias = (d.b / (d.b + d.s)) * 100;
-            const net = d.b - d.s;
+            const trades = tradeStore[s] || [];
+            if (trades.length < 10) return;
 
-            if (net > config.WHALE_THRESHOLD_USD && bias > 65) {
-                const now = Date.now();
-                if (!cooldowns[s] || now - cooldowns[s] > config.ALERT_COOLDOWN_MIN * 60000) {
-                    sendTelegram(`🚀 *WHALE INFLOW: ${s}*\n💰 Net: +$${(net/1000).toFixed(0)}k\n📊 Bias: ${bias.toFixed(1)}%`);
-                    cooldowns[s] = now;
-                }
+            // 1. Windows
+            const fast = trades.filter(t => t.t > now - (10 * 60000));   // 10m
+            const steady = trades.filter(t => t.t > now - (60 * 60000)); // 1h
+            const base = trades.filter(t => t.t > now - (180 * 60000)); // 3h
+
+            // 2. Metrics (Fast Window)
+            const fBuy = fast.filter(t => t.side === 'BUY').reduce((a, b) => a + b.usd, 0);
+            const fSell = fast.filter(t => t.side === 'SELL').reduce((a, b) => a + b.usd, 0);
+            const fBias = (fBuy / (fBuy + fSell)) * 100;
+            const fActivity = fast.length / 10; // Trades per minute
+
+            // 3. Metrics (Baseline)
+            const bActivity = base.length / 180;
+            const actMult = bActivity > 0 ? (fActivity / bActivity) : 1;
+
+            // 4. Classification & Notes
+            let label = "";
+            let note = "";
+            
+            if (base.length < 100) {
+                note = "🟡 Baseline warming up. Early data.";
+            } else if (actMult >= 2.0 && fBias >= 65) {
+                label = "🚀 MOMENTUM BUILDING";
+                note = "🔥 Momentum building. Watch breakouts.";
+            } else if (fBias <= 35 && actMult >= 1.5) {
+                label = "⚠️ DISTRIBUTION";
+                note = "🚨 Distribution pressure. Avoid chasing.";
+            } else if (fBias > 58 && actMult < 1.5) {
+                label = "📈 STEADY ACCUMULATION";
+                note = "💎 Accumulation pressure. Dips likely bought.";
+            } else {
+                label = "⚖️ MIXED TAPE";
+                note = "⚪ Mixed tape. Wait for confirmation.";
             }
-            d.b *= 0.7; d.s *= 0.7; 
+
+            // 5. State-Driven Alerts (Only alert on meaningful changes)
+            if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
+            
+            const isNewSignal = label !== stateMemory[s].lastLabel;
+            const cooldownPassed = now - stateMemory[s].lastAlert > config.ALERT_COOLDOWN_MIN * 60000;
+
+            if (label !== "⚖️ MIXED TAPE" && (isNewSignal || cooldownPassed)) {
+                sendTelegram(
+                    `*${s}* | ${label}\n` +
+                    `💰 Fast Vol: $${((fBuy + fSell)/1000).toFixed(1)}k\n` +
+                    `📊 Buy Bias: ${fBias.toFixed(1)}%\n` +
+                    `⚡ Activity: ${actMult.toFixed(1)}x normal\n` +
+                    `📝 _${note}_`
+                );
+                stateMemory[s].lastLabel = label;
+                stateMemory[s].lastAlert = now;
+            }
         });
-    }, config.SCAN_INTERVAL_SEC * 1000);
+    }, 30000); // Scan every 30 seconds
 }
 
 module.exports = { startScanner, startRadar, sendTelegram, getHotlist: () => hotlist };
