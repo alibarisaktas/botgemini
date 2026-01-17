@@ -3,9 +3,7 @@ const config = require('./config');
 const fs = require('fs');
 
 // --- PERSISTENCE CONFIG ---
-// If you don't use a Volume yet, this will save to the bot folder.
-// If you add a Volume, change this to '/app/data/trade_memory.json'
-const MEMORY_FILE = './trade_memory.json';
+const MEMORY_FILE = '/app/data/trade_memory.json';
 
 let tradeStore = {}; 
 let hotlist = [];
