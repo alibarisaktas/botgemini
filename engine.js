@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const config = require('./config');
 const fs = require('fs');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const fetch = require('node-fetch'); // Simplified for version 2.7.0
 
 const MEMORY_FILE = '/app/data/trade_memory.json';
 let tradeStore = {}; 
@@ -29,7 +29,7 @@ function loadMemory() {
             tradeStore = parsed.tradeStore || {};
             startTime = parsed.startTime || Date.now();
             lastUpdateId = parsed.lastUpdateId || 0;
-            console.log("📁 Data restored.");
+            console.log("📁 Data restored from volume.");
         } catch (e) { console.log("📁 No memory found."); }
     }
 }
@@ -44,7 +44,7 @@ async function sendTelegram(text) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: config.TG_CHAT_ID, text, parse_mode: 'Markdown' })
         });
-    } catch (e) {}
+    } catch (e) { console.error("Telegram Error:", e.message); }
 }
 
 // --- ANALYSIS UTILS ---
@@ -72,7 +72,7 @@ function analyzeSymbol(s) {
     const totalFast = fBuy + fSell;
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
 
-    // FIX: Dynamic Activity Multiplier
+    // FIX: Dynamic Activity Multiplier (fixes the 18.0x plateau)
     const minsElapsed = Math.min(180, (now - startTime) / 60000);
     const fActivity = fast.length / 10;
     const bActivity = base.length / (minsElapsed || 1); 
@@ -83,23 +83,22 @@ function analyzeSymbol(s) {
 
     let label = "⚖️ MIXED TAPE";
     
-    // FIX 2: Directional Confirmation
+    // FIX: Directional Confirmation (Price must follow volume)
     if (actMult >= 2.0 && fBias >= 65 && totalFast > config.WHALE_THRESHOLD_USD) {
         if (change5m > 0.3 || change1h > 0.5) label = "🚀 MOMENTUM BUILDING";
         else label = "🔄 ACCUMULATION (Price Lagging)";
     } else if (fBias <= 35 && actMult >= 1.5 && totalFast > config.WHALE_THRESHOLD_USD) {
         if (change5m < -0.3 || change1h < -0.5) label = "⚠️ DISTRIBUTION";
         else label = "🔄 DISTRIBUTION (Price Resilient)";
-    } else if (fBias > 58 && actMult < 1.5 && totalFast > 50000) {
-        label = "📈 STEADY ACCUMULATION";
     }
 
-    return { label, fBias, actMult, totalFast, change1h, change5m, currentPrice: data.lastPrice };
+    return { label, fBias, actMult, totalFast, change1h, currentPrice: data.lastPrice };
 }
 
 // --- SCANNER & COLLECTOR ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
+    ws.on('open', () => console.log("🔍 Scanner Active..."));
     ws.on('message', (data) => {
         try {
             const tickers = JSON.parse(data);
@@ -127,8 +126,12 @@ function startCollector() {
     if (hotlist.length === 0) { isConnecting = false; return; }
     const streams = hotlist.slice(0, 40).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
-    collectorWs.on('error', (err) => { isConnecting = false; });
-    collectorWs.on('open', () => { setTimeout(() => { isConnecting = false; }, 10000); });
+    
+    collectorWs.on('open', () => { 
+        console.log(`📡 WebSocket established with ${hotlist.slice(0, 40).length} pairs.`);
+        setTimeout(() => { isConnecting = false; }, 10000); 
+    });
+    
     collectorWs.on('message', (msg) => {
         try {
             const d = JSON.parse(msg).data;
@@ -136,36 +139,37 @@ function startCollector() {
             const p = parseFloat(d.p);
             tradeStore[d.s].lastPrice = p;
             tradeStore[d.s].trades.push({ usd: p * parseFloat(d.q), p: p, side: d.m ? 'SELL' : 'BUY', t: Date.now() });
+            
+            // Clean memory: Keep only last 3h
             const cutoff = Date.now() - 10800000;
-            if (tradeStore[d.s].trades.length > 800) tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
+            if (tradeStore[d.s].trades.length > 800) {
+                tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
+            }
         } catch (e) {}
     });
     collectorWs.on('close', () => { isConnecting = false; setTimeout(startCollector, 5000); });
 }
 
-// --- RADAR (With Multi-Layer Confirmation) ---
+// --- RADAR ---
 function startRadar() {
+    console.log("⚡ Radar Monitoring Started.");
     setInterval(() => {
         hotlist.forEach(s => {
             const stats = analyzeSymbol(s);
             if (!stats || stats.label === "⚖️ MIXED TAPE" || stats.label.includes("Lagging") || stats.label.includes("Resilient")) return;
 
             const now = Date.now();
-            if (!stateMemory[s]) {
-                stateMemory[s] = { lastLabel: '', alerts: {}, pendingLabel: '', pendingCount: 0 };
-            }
+            if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', alerts: {}, pendingLabel: '', pendingCount: 0 };
 
             const mem = stateMemory[s];
             const cooldownMs = config.ALERT_COOLDOWN_MIN * 60000;
-            const lastAlertForThisLabel = mem.alerts[stats.label] || 0;
+            const lastAlertForLabel = mem.alerts[stats.label] || 0;
 
-            // FIX 1 & 4: Confirmation Logic & Returning to old state
+            // FIX: Confirm pattern for 2 consecutive scans before alerting
             if (stats.label !== mem.lastLabel) {
                 if (stats.label === mem.pendingLabel) {
                     mem.pendingCount++;
-                    
-                    // FIX 3: Per-Label Cooldown
-                    if (mem.pendingCount >= 2 && now - lastAlertForThisLabel > cooldownMs) {
+                    if (mem.pendingCount >= 2 && now - lastAlertForLabel > cooldownMs) {
                         const pStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
                         const cStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
                         
@@ -180,9 +184,6 @@ function startRadar() {
                     mem.pendingLabel = stats.label;
                     mem.pendingCount = 1;
                 }
-            } else {
-                mem.pendingLabel = '';
-                mem.pendingCount = 0;
             }
         });
     }, 30000);
@@ -197,8 +198,7 @@ function startListener() {
                 for (const update of data.result) {
                     lastUpdateId = update.update_id; 
                     const msg = update.message || update.channel_post;
-                    if (!msg || !msg.text) continue;
-                    if (msg.text === '/status') {
+                    if (msg && msg.text === '/status') {
                         const tracked = Object.keys(tradeStore).length;
                         const baseline = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
                         sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${Math.floor(process.uptime() / 60)}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n🔥 Scanner: ${hotlist.length} pairs`);
