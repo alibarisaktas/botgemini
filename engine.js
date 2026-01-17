@@ -76,17 +76,15 @@ function startScanner() {
     });
 }
 
-// --- STAGE B: COLLECTOR (The Crash Fix) ---
+// --- STAGE B: COLLECTOR ---
 function startCollector() {
-    // 1. SAFE TERMINATION: Check state before killing connection
     if (collectorWs) {
         try {
-            // Only terminate if it's actually OPEN or CONNECTING
             if (collectorWs.readyState === WebSocket.OPEN || collectorWs.readyState === WebSocket.CONNECTING) {
-                collectorWs.removeAllListeners(); // Prevent old errors from triggering
+                collectorWs.removeAllListeners();
                 collectorWs.terminate();
             }
-        } catch (e) { console.log("⚠️ Safe Cleanup: Handled termination race."); }
+        } catch (e) { console.log("⚠️ Cleanup: Handled race condition."); }
     }
     
     if (hotlist.length === 0) return;
@@ -94,12 +92,10 @@ function startCollector() {
     const streams = hotlist.slice(0, 40).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
     
-    // 2. ERROR CATCHING: This stops the "Unhandled error event" crash
     collectorWs.on('error', (err) => {
-        if (err.message.includes('closed before the connection was established')) {
-            return; // Ignore this specific race condition error
+        if (!err.message.includes('closed before the connection was established')) {
+            console.error("Collector WS Error:", err.message);
         }
-        console.error("Collector WS Error:", err.message);
     });
 
     collectorWs.on('message', (msg) => {
@@ -126,24 +122,31 @@ function startCollector() {
         } catch (e) {}
     });
 
-    collectorWs.on('close', () => {
-        console.log("📡 Stream closed. Reconnecting in 5s...");
-        setTimeout(startCollector, 5000);
-    });
+    collectorWs.on('close', () => setTimeout(startCollector, 5000));
 }
 
-// --- RADAR & LISTENER ---
+// --- RADAR: ALERTS ---
 function startRadar() {
     setInterval(() => {
         hotlist.forEach(s => {
             const stats = analyzeSymbol(s);
             if (!stats || stats.label === "⚖️ MIXED TAPE") return;
+
             const now = Date.now();
             if (!stateMemory[s]) stateMemory[s] = { lastLabel: '', lastAlert: 0 };
+
             if (stats.label !== stateMemory[s].lastLabel || now - stateMemory[s].lastAlert > 1500000) {
                 const priceStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
                 const changeStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
-                sendTelegram(`*${s}* | ${stats.label}\n💵 Price: $${priceStr} (${changeStr} 1h)\n💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
+                
+                sendTelegram(
+                    `*${s}* | ${stats.label}\n` +
+                    `💵 Price: $${priceStr} (${changeStr} 1h)\n` +
+                    `💰 10m Vol: $${(stats.totalFast/1000).toFixed(1)}k\n` +
+                    `📊 Bias: ${stats.fBias.toFixed(1)}%\n` +
+                    `⚡ Activity: ${stats.actMult.toFixed(1)}x`
+                );
+                
                 stateMemory[s].lastLabel = stats.label;
                 stateMemory[s].lastAlert = now;
             }
@@ -151,6 +154,7 @@ function startRadar() {
     }, 30000);
 }
 
+// --- LISTENER: COMMANDS ---
 function startListener() {
     setInterval(async () => {
         try {
@@ -160,10 +164,27 @@ function startListener() {
                 for (const update of data.result) {
                     lastUpdateId = update.update_id; 
                     const msg = update.message || update.channel_post;
-                    if (msg && msg.text === '/status') {
+                    if (!msg || !msg.text) continue;
+                    const text = msg.text.trim();
+
+                    if (text === '/status') {
                         const tracked = Object.keys(tradeStore).length;
                         const baseline = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
-                        sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${Math.floor(process.uptime() / 60)}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}`);
+                        sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${Math.floor(process.uptime() / 60)}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n🔥 Scanner: ${hotlist.length} pairs`);
+                    }
+
+                    if (text.startsWith('/check')) {
+                        let symbol = text.split(' ')[1]?.toUpperCase();
+                        if (!symbol) continue;
+                        if (!symbol.endsWith('USDT')) symbol += 'USDT';
+                        const stats = analyzeSymbol(symbol);
+                        if (!stats) {
+                            sendTelegram(`❌ No data for ${symbol}.`);
+                            continue;
+                        }
+                        const pStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
+                        const cStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
+                        sendTelegram(`🔍 *Manual Check: ${symbol}*\nState: ${stats.label}\n💵 Price: $${pStr} (${cStr} 1h)\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
                     }
                 }
             }
