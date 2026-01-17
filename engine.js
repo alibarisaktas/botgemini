@@ -15,13 +15,10 @@ let startTime = Date.now();
 // --- PERSISTENCE LOGIC ---
 function saveMemory() {
     try {
-        const data = JSON.stringify({
-            tradeStore,
-            startTime,
-            lastUpdateId
-        });
+        const data = JSON.stringify({ tradeStore, startTime, lastUpdateId });
+        // Use a temp file for safer writing if you prefer, but this is fine for now
         fs.writeFileSync(MEMORY_FILE, data);
-        console.log("💾 Memory saved to disk.");
+        console.log("💾 Memory saved to persistent volume.");
     } catch (e) { console.error("💾 Save Error:", e.message); }
 }
 
@@ -33,13 +30,12 @@ function loadMemory() {
             tradeStore = parsed.tradeStore || {};
             startTime = parsed.startTime || Date.now();
             lastUpdateId = parsed.lastUpdateId || 0;
-            console.log("📁 Memory loaded successfully. Resuming baseline...");
-        } catch (e) { console.log("📁 Memory file corrupt or empty."); }
+            console.log("📁 Persistence: Data restored from volume.");
+        } catch (e) { console.log("📁 Persistence: Memory file empty or corrupt."); }
     }
 }
 
-// Auto-save every 5 minutes
-setInterval(saveMemory, 300000);
+setInterval(saveMemory, 300000); // Save every 5 mins
 
 // --- TELEGRAM OUTBOUND ---
 async function sendTelegram(text) {
@@ -60,9 +56,9 @@ function analyzeSymbol(s) {
     if (!data || !data.trades || data.trades.length < 5) return null;
 
     const trades = data.trades;
-    const fast = trades.filter(t => t.t > now - 600000); // 10m
-    const base = trades.filter(t => t.t > now - 10800000); // 3h
-    const hourAgo = trades.filter(t => t.t > now - 3600000); // 1h
+    const fast = trades.filter(t => t.t > now - 600000);
+    const base = trades.filter(t => t.t > now - 10800000);
+    const hourAgo = trades.filter(t => t.t > now - 3600000);
 
     const fBuy = fast.filter(t => t.side === 'BUY').reduce((a, b) => a + b.usd, 0);
     const fSell = fast.filter(t => t.side === 'SELL').reduce((a, b) => a + b.usd, 0);
@@ -95,14 +91,13 @@ function startScanner() {
         try {
             const tickers = JSON.parse(data);
             const filtered = tickers
-                .filter(t => t.s.endsWith('USDT') && !['BTCUSDT','ETHUSDT','BNBUSDT'].includes(t.s) && (parseFloat(t.c) * parseFloat(t.v)) > 1000000)
+                .filter(t => t.s.endsWith('USDT') && !['BTCUSDT','ETHUSDT','BNBUSDT','USDCUSDT'].includes(t.s) && (parseFloat(t.c) * parseFloat(t.v)) > 1000000)
                 .map(t => t.s);
 
             if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
                 hotlist = filtered;
                 
                 // --- MEMORY CLEANER ---
-                // If a coin is not in the top list anymore, delete its data to save RAM
                 Object.keys(tradeStore).forEach(symbol => {
                     if (!hotlist.includes(symbol)) delete tradeStore[symbol];
                 });
@@ -112,32 +107,58 @@ function startScanner() {
             }
         } catch (e) {}
     });
+    ws.on('error', (e) => console.log("Scanner WS Error:", e.message));
+    ws.on('close', () => setTimeout(startScanner, 5000));
 }
 
-// --- STAGE B: COLLECTOR ---
+// --- STAGE B: COLLECTOR (Crash-Proof Fix) ---
 function startCollector() {
     if (collectorWs) {
-        try { if (collectorWs.readyState < 2) { collectorWs.removeAllListeners(); collectorWs.terminate(); } } catch (e) {}
+        try {
+            // Remove all listeners first to prevent a dying socket from triggering an error event
+            collectorWs.removeAllListeners();
+            
+            // Only terminate if not already closed
+            if (collectorWs.readyState !== WebSocket.CLOSED && collectorWs.readyState !== WebSocket.CLOSING) {
+                collectorWs.terminate();
+            }
+        } catch (e) { console.log("⚠️ Collector cleanup race handled."); }
+        collectorWs = null;
     }
+    
     if (hotlist.length === 0) return;
+    
     const streams = hotlist.slice(0, 40).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+    
+    // --- THE CRITICAL FIX: Explicit error listener on the instance ---
+    collectorWs.on('error', (err) => {
+        // Ignore the "closed before established" error specifically
+        if (err.message && err.message.includes('closed before')) return;
+        console.error("Collector Instance Error:", err.message);
+    });
+
     collectorWs.on('message', (msg) => {
         try {
-            const data = JSON.parse(msg).data;
+            const parsed = JSON.parse(msg);
+            const data = parsed.data || parsed;
+            if (!data || !data.s) return;
+            
             if (!tradeStore[data.s]) tradeStore[data.s] = { trades: [], lastPrice: 0 };
             const p = parseFloat(data.p);
             tradeStore[data.s].lastPrice = p;
             tradeStore[data.s].trades.push({ usd: p * parseFloat(data.q), p: p, side: data.m ? 'SELL' : 'BUY', t: Date.now() });
             
-            // Limit trade history to 3 hours
             const cutoff = Date.now() - 10800000;
             if (tradeStore[data.s].trades.length > 500) {
                 tradeStore[data.s].trades = tradeStore[data.s].trades.filter(t => t.t > cutoff);
             }
         } catch (e) {}
     });
-    collectorWs.on('close', () => setTimeout(startCollector, 5000));
+
+    collectorWs.on('close', () => {
+        if (collectorWs) setTimeout(startCollector, 5000);
+    });
 }
 
 function startRadar() {
@@ -170,6 +191,16 @@ function startListener() {
                         const tracked = Object.keys(tradeStore).length;
                         const baseline = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
                         sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${Math.floor(process.uptime() / 60)}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n🔥 Scanner: ${hotlist.length} pairs`);
+                    }
+                    if (msg && msg.text.startsWith('/check')) {
+                        let sym = msg.text.split(' ')[1]?.toUpperCase();
+                        if (!sym) continue;
+                        if (!sym.endsWith('USDT')) sym += 'USDT';
+                        const stats = analyzeSymbol(sym);
+                        if (!stats) { sendTelegram(`❌ No data for ${sym}.`); continue; }
+                        const pStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
+                        const cStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
+                        sendTelegram(`🔍 *Check: ${sym}*\n${stats.label}\n💵 Price: $${pStr} (${cStr} 1h)\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x`);
                     }
                 }
             }
