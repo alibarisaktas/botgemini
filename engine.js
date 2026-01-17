@@ -13,13 +13,12 @@ let isConnecting = false;
 
 let stateMemory = {
     globalThreshold: 0.3, 
-    symbolData: {} // Now persisted to memory!
+    symbolData: {} 
 };
 
 // --- PERSISTENCE ---
 function saveMemory() {
     try {
-        // FIX: Now persisting symbolData so cooldowns survive restarts
         const data = JSON.stringify({ 
             tradeStore, 
             startTime, 
@@ -41,15 +40,14 @@ function loadMemory() {
             startTime = parsed.startTime || Date.now();
             lastUpdateId = parsed.lastUpdateId || 0;
             stateMemory.globalThreshold = parsed.globalThreshold || 0.3;
-            stateMemory.symbolData = parsed.symbolData || {}; // Restore cooldowns
+            stateMemory.symbolData = parsed.symbolData || {}; 
             console.log(`📁 State restored. Threshold: ${stateMemory.globalThreshold}%`);
         } catch (e) { console.log("📁 Memory corrupted or empty."); }
     }
 }
 setInterval(saveMemory, 300000);
 
-// --- GLOBAL PRUNING (Fix #5) ---
-// Runs every 5 minutes to ensure no "dead" trades stay in RAM
+// --- GLOBAL PRUNING ---
 setInterval(() => {
     const cutoff = Date.now() - 10800000; // 3 hours
     let prunedCount = 0;
@@ -100,10 +98,14 @@ function analyzeSymbol(s) {
     const totalFast = fBuy + fSell;
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
 
-    // FIX: Standardized Unit Math (TPM vs TPM)
-    const fastTpm = fast.length / 10; // trades per minute in 10m window
-    const baseTpm = base.length / 180; // trades per minute in 180m window
+    // --- FIX: Dynamic Unit Math (Eliminates the 18.0x plateau) ---
+    const timeSinceStart = (now - startTime) / 60000; 
+    const dynamicBaseMins = Math.min(180, Math.max(1, timeSinceStart)); 
+
+    const fastTpm = fast.length / 10; 
+    const baseTpm = base.length / dynamicBaseMins; 
     const actMult = baseTpm > 0 ? (fastTpm / baseTpm) : 1;
+    // -------------------------------------------------------------
 
     const change1h = calculatePriceChange(trades, 3600000);
     const change5m = calculatePriceChange(trades, 300000);
@@ -134,7 +136,6 @@ function startScanner() {
                 .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
                 .map(t => t.s);
 
-            // FIX: Sorted comparison to prevent unnecessary reconnects (Fix #4)
             if (JSON.stringify(filtered.sort()) !== JSON.stringify(hotlist.sort())) {
                 hotlist = filtered;
                 Object.keys(tradeStore).forEach(symbol => { if (!hotlist.includes(symbol)) delete tradeStore[symbol]; });
