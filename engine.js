@@ -68,20 +68,26 @@ function analyzeSymbol(s) {
     if (!data || !data.trades || data.trades.length < 10) return null;
 
     const trades = data.trades;
-    const fast = trades.filter(t => t.t > now - 600000); 
-    const base = trades.filter(t => t.t > now - 10800000); 
+    
+    // Windows in MS
+    const fastWin = 600000;   // 10 min
+    const baseWin = 10800000; // 3 hours
+    const hourWin = 3600000;  // 1 hour
+
+    const fast = trades.filter(t => t.t > now - fastWin); 
+    const base = trades.filter(t => t.t > now - baseWin); 
 
     const fBuy = fast.filter(t => t.side === 'BUY').reduce((a, b) => a + b.usd, 0);
     const fSell = fast.filter(t => t.side === 'SELL').reduce((a, b) => a + b.usd, 0);
     const totalFast = fBuy + fSell;
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
 
-    const minsElapsed = Math.min(180, (now - startTime) / 60000);
-    const fActivity = fast.length / 10;
-    const bActivity = base.length / (minsElapsed || 1); 
-    const actMult = bActivity > 0 ? (fActivity / bActivity) : 1;
+    // FIXED: Corrected activity multiplier logic
+    const fastTpm = fast.length / (fastWin / 60000);
+    const baseTpm = base.length / (baseWin / 60000);
+    const actMult = baseTpm > 0 ? (fastTpm / baseTpm) : 1;
 
-    const change1h = calculatePriceChange(trades, 3600000);
+    const change1h = calculatePriceChange(trades, hourWin);
     const change5m = calculatePriceChange(trades, 300000);
     const threshold = stateMemory.globalThreshold;
 
@@ -139,16 +145,19 @@ function startCollector() {
             const p = parseFloat(d.p);
             tradeStore[d.s].lastPrice = p;
             tradeStore[d.s].trades.push({ usd: p * parseFloat(d.q), p, side: d.m ? 'SELL' : 'BUY', t: Date.now() });
+            
+            // Increased memory limit to allow true 3-hour baseline for high-volume pairs
             const cutoff = Date.now() - 10800000;
-            if (tradeStore[d.s].trades.length > 800) tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
+            if (tradeStore[d.s].trades.length > 15000) {
+                tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
+            }
         } catch (e) {}
     });
     collectorWs.on('close', () => { isConnecting = false; setTimeout(startCollector, 5000); });
 }
 
-// --- RADAR (RESTORED OUTPUT) ---
+// --- RADAR ---
 function startRadar() {
-    console.log("⚡ Radar Monitoring Started.");
     setInterval(() => {
         hotlist.forEach(s => {
             const stats = analyzeSymbol(s);
@@ -169,7 +178,6 @@ function startRadar() {
                         const cStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
                         const volStr = `$${(stats.totalFast/1000).toFixed(1)}k`;
                         
-                        // RESTORED FORMAT
                         sendTelegram(`*${s}* | ${stats.label}\n💵 Price: $${pStr} (${cStr} 1h)\n💰 10m Vol: ${volStr}\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡️ Activity: ${stats.actMult.toFixed(1)}x`);
                         
                         mem.lastLabel = stats.label;
