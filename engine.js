@@ -13,15 +13,22 @@ let isConnecting = false;
 
 let stateMemory = {
     globalThreshold: 0.3, 
-    symbolData: {}        
+    symbolData: {} // Now persisted to memory!
 };
 
 // --- PERSISTENCE ---
 function saveMemory() {
     try {
-        const data = JSON.stringify({ tradeStore, startTime, lastUpdateId, globalThreshold: stateMemory.globalThreshold });
+        // FIX: Now persisting symbolData so cooldowns survive restarts
+        const data = JSON.stringify({ 
+            tradeStore, 
+            startTime, 
+            lastUpdateId, 
+            globalThreshold: stateMemory.globalThreshold,
+            symbolData: stateMemory.symbolData 
+        });
         fs.writeFileSync(MEMORY_FILE, data);
-        console.log("💾 Persistent memory saved.");
+        console.log("💾 Full system state persisted.");
     } catch (e) { console.error("💾 Save Error:", e.message); }
 }
 
@@ -34,11 +41,25 @@ function loadMemory() {
             startTime = parsed.startTime || Date.now();
             lastUpdateId = parsed.lastUpdateId || 0;
             stateMemory.globalThreshold = parsed.globalThreshold || 0.3;
-            console.log(`📁 Data restored. Current Threshold: ${stateMemory.globalThreshold}%`);
-        } catch (e) { console.log("📁 No existing memory found."); }
+            stateMemory.symbolData = parsed.symbolData || {}; // Restore cooldowns
+            console.log(`📁 State restored. Threshold: ${stateMemory.globalThreshold}%`);
+        } catch (e) { console.log("📁 Memory corrupted or empty."); }
     }
 }
 setInterval(saveMemory, 300000);
+
+// --- GLOBAL PRUNING (Fix #5) ---
+// Runs every 5 minutes to ensure no "dead" trades stay in RAM
+setInterval(() => {
+    const cutoff = Date.now() - 10800000; // 3 hours
+    let prunedCount = 0;
+    Object.keys(tradeStore).forEach(s => {
+        const initialCount = tradeStore[s].trades.length;
+        tradeStore[s].trades = tradeStore[s].trades.filter(t => t.t > cutoff);
+        if (initialCount !== tradeStore[s].trades.length) prunedCount++;
+    });
+    if (prunedCount > 0) console.log(`🧹 Periodic Pruning: Cleaned trades for ${prunedCount} symbols.`);
+}, 300000);
 
 // --- TELEGRAM ---
 async function sendTelegram(text) {
@@ -68,11 +89,8 @@ function analyzeSymbol(s) {
     if (!data || !data.trades || data.trades.length < 10) return null;
 
     const trades = data.trades;
-    
-    // Windows in MS
     const fastWin = 600000;   // 10 min
     const baseWin = 10800000; // 3 hours
-    const hourWin = 3600000;  // 1 hour
 
     const fast = trades.filter(t => t.t > now - fastWin); 
     const base = trades.filter(t => t.t > now - baseWin); 
@@ -82,12 +100,12 @@ function analyzeSymbol(s) {
     const totalFast = fBuy + fSell;
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
 
-    // FIXED: Corrected activity multiplier logic
-    const fastTpm = fast.length / (fastWin / 60000);
-    const baseTpm = base.length / (baseWin / 60000);
+    // FIX: Standardized Unit Math (TPM vs TPM)
+    const fastTpm = fast.length / 10; // trades per minute in 10m window
+    const baseTpm = base.length / 180; // trades per minute in 180m window
     const actMult = baseTpm > 0 ? (fastTpm / baseTpm) : 1;
 
-    const change1h = calculatePriceChange(trades, hourWin);
+    const change1h = calculatePriceChange(trades, 3600000);
     const change5m = calculatePriceChange(trades, 300000);
     const threshold = stateMemory.globalThreshold;
 
@@ -116,7 +134,8 @@ function startScanner() {
                 .filter(t => (parseFloat(t.c) * parseFloat(t.v)) > config.MIN_VOLUME_USDT)
                 .map(t => t.s);
 
-            if (JSON.stringify(filtered) !== JSON.stringify(hotlist)) {
+            // FIX: Sorted comparison to prevent unnecessary reconnects (Fix #4)
+            if (JSON.stringify(filtered.sort()) !== JSON.stringify(hotlist.sort())) {
                 hotlist = filtered;
                 Object.keys(tradeStore).forEach(symbol => { if (!hotlist.includes(symbol)) delete tradeStore[symbol]; });
                 if (!isConnecting) startCollector();
@@ -145,12 +164,6 @@ function startCollector() {
             const p = parseFloat(d.p);
             tradeStore[d.s].lastPrice = p;
             tradeStore[d.s].trades.push({ usd: p * parseFloat(d.q), p, side: d.m ? 'SELL' : 'BUY', t: Date.now() });
-            
-            // Increased memory limit to allow true 3-hour baseline for high-volume pairs
-            const cutoff = Date.now() - 10800000;
-            if (tradeStore[d.s].trades.length > 15000) {
-                tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
-            }
         } catch (e) {}
     });
     collectorWs.on('close', () => { isConnecting = false; setTimeout(startCollector, 5000); });
@@ -189,12 +202,14 @@ function startRadar() {
                     mem.pendingLabel = stats.label;
                     mem.pendingCount = 1;
                 }
+            } else {
+                mem.pendingLabel = '';
+                mem.pendingCount = 0;
             }
         });
     }, 30000);
 }
 
-// --- COMMANDS ---
 function startListener() {
     setInterval(async () => {
         try {
