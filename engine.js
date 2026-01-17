@@ -84,8 +84,6 @@ function analyzeSymbol(s) {
 
     const change1h = calculatePriceChange(trades, 3600000);
     const change5m = calculatePriceChange(trades, 300000);
-    
-    // Dynamic thresholds from stateMemory
     const threshold = stateMemory.globalThreshold;
 
     let label = "⚖️ MIXED TAPE";
@@ -195,36 +193,38 @@ function startListener() {
 
                     const text = msg.text.trim();
 
-                    // /status
                     if (text.startsWith('/status')) {
+                        const uptimeMin = Math.floor(process.uptime() / 60);
                         const tracked = Object.keys(tradeStore).length;
                         const baseline = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
-                        sendTelegram(`🤖 *Status*\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n⚙️ Threshold: ${stateMemory.globalThreshold}%`);
+                        sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${uptimeMin}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n🔥 Scanner: ${hotlist.length} pairs\n⚙️ Threshold: ${stateMemory.globalThreshold}%`);
                     }
 
-                    // /threshold [val]
-                    if (text.startsWith('/threshold')) {
-                        const val = parseFloat(text.split(' ')[1]);
+                    else if (text.startsWith('/threshold')) {
+                        const parts = text.split(' ');
+                        const val = parseFloat(parts[1]);
                         if (!isNaN(val)) {
                             stateMemory.globalThreshold = val;
-                            sendTelegram(`✅ *Threshold Updated*\nNew requirement: ${val}% price change in 5m.`);
+                            sendTelegram(`✅ *Threshold Updated*\nSignals now require ${val}% price change in 5m.`);
                         } else {
-                            sendTelegram(`❌ Usage: \`/threshold 0.5\``);
+                            sendTelegram(`❌ Current threshold is ${stateMemory.globalThreshold}%. Usage: \`/threshold 0.5\``);
                         }
                     }
 
-                    // /check [symbol]
-                    if (text.startsWith('/check')) {
-                        let sym = text.split(' ')[1]?.toUpperCase();
+                    else if (text.startsWith('/check')) {
+                        const parts = text.split(' ');
+                        let sym = parts[1]?.toUpperCase();
                         if (sym) {
                             if (!sym.endsWith('USDT')) sym += 'USDT';
                             const stats = analyzeSymbol(sym);
                             if (!stats) {
-                                sendTelegram(`❌ No data for ${sym}. Bot is currently tracking ${hotlist.length} pairs.`);
+                                sendTelegram(`❌ No trade data for ${sym} yet. The bot is tracking ${hotlist.length} symbols from the volume scanner.`);
                             } else {
                                 const pStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
-                                sendTelegram(`🔍 *Analysis: ${sym}*\n${stats.label}\n💵 Price: $${pStr}\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x\n📈 5m: ${stats.change5m.toFixed(2)}% (Target: ${stats.threshold}%)\n📉 1h: ${stats.change1h.toFixed(2)}%`);
+                                sendTelegram(`🔍 *Analysis: ${sym}*\n${stats.label}\n💵 Price: $${pStr}\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x\n📈 5m: ${stats.change5m.toFixed(2)}% (Need ${stats.threshold}%)\n📉 1h: ${stats.change1h.toFixed(2)}%`);
                             }
+                        } else {
+                            sendTelegram(`❌ Usage: \`/check [symbol]\` (e.g. /check btc)`);
                         }
                     }
                 }
