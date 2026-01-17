@@ -11,10 +11,9 @@ let lastUpdateId = 0;
 let startTime = Date.now();
 let isConnecting = false;
 
-// Shared State for Dynamic Configs
 let stateMemory = {
-    globalThreshold: 0.3, // You can change this via /threshold in TG
-    symbolData: {}        // Per-symbol cooldowns and labels
+    globalThreshold: 0.3, 
+    symbolData: {}        
 };
 
 // --- PERSISTENCE ---
@@ -22,7 +21,7 @@ function saveMemory() {
     try {
         const data = JSON.stringify({ tradeStore, startTime, lastUpdateId, globalThreshold: stateMemory.globalThreshold });
         fs.writeFileSync(MEMORY_FILE, data);
-        console.log("💾 Persistent memory saved to volume.");
+        console.log("💾 Persistent memory saved.");
     } catch (e) { console.error("💾 Save Error:", e.message); }
 }
 
@@ -36,7 +35,7 @@ function loadMemory() {
             lastUpdateId = parsed.lastUpdateId || 0;
             stateMemory.globalThreshold = parsed.globalThreshold || 0.3;
             console.log(`📁 Data restored. Current Threshold: ${stateMemory.globalThreshold}%`);
-        } catch (e) { console.log("📁 No existing memory found, starting fresh."); }
+        } catch (e) { console.log("📁 No existing memory found."); }
     }
 }
 setInterval(saveMemory, 300000);
@@ -50,7 +49,7 @@ async function sendTelegram(text) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: config.TG_CHAT_ID, text, parse_mode: 'Markdown' })
         });
-    } catch (e) { console.error("Telegram Error:", e.message); }
+    } catch (e) {}
 }
 
 // --- ANALYSIS UTILS ---
@@ -69,15 +68,14 @@ function analyzeSymbol(s) {
     if (!data || !data.trades || data.trades.length < 10) return null;
 
     const trades = data.trades;
-    const fast = trades.filter(t => t.t > now - 600000); // 10m
-    const base = trades.filter(t => t.t > now - 10800000); // 3h
+    const fast = trades.filter(t => t.t > now - 600000); 
+    const base = trades.filter(t => t.t > now - 10800000); 
 
     const fBuy = fast.filter(t => t.side === 'BUY').reduce((a, b) => a + b.usd, 0);
     const fSell = fast.filter(t => t.side === 'SELL').reduce((a, b) => a + b.usd, 0);
     const totalFast = fBuy + fSell;
     const fBias = totalFast > 0 ? (fBuy / totalFast) * 100 : 50;
 
-    // Fix for the 18.0x plateau
     const minsElapsed = Math.min(180, (now - startTime) / 60000);
     const fActivity = fast.length / 10;
     const bActivity = base.length / (minsElapsed || 1); 
@@ -99,10 +97,10 @@ function analyzeSymbol(s) {
     return { label, fBias, actMult, totalFast, change1h, change5m, currentPrice: data.lastPrice, threshold };
 }
 
-// --- SCANNER ---
+// --- SCANNER & COLLECTOR ---
 function startScanner() {
     const ws = new WebSocket('wss://stream.binance.com:9443/ws/!miniTicker@arr');
-    ws.on('open', () => console.log("🔍 Volume Scanner Active..."));
+    ws.on('open', () => console.log("🔍 Scanner Active..."));
     ws.on('message', (data) => {
         try {
             const tickers = JSON.parse(data);
@@ -122,7 +120,6 @@ function startScanner() {
     ws.on('close', () => setTimeout(startScanner, 5000));
 }
 
-// --- COLLECTOR ---
 function startCollector() {
     isConnecting = true;
     if (collectorWs) {
@@ -131,12 +128,10 @@ function startCollector() {
     if (hotlist.length === 0) { isConnecting = false; return; }
     const streams = hotlist.slice(0, 40).map(s => `${s.toLowerCase()}@aggTrade`).join('/');
     collectorWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
-    
     collectorWs.on('open', () => { 
         console.log(`📡 WebSocket established with ${hotlist.slice(0, 40).length} pairs.`);
         setTimeout(() => { isConnecting = false; }, 10000); 
     });
-    
     collectorWs.on('message', (msg) => {
         try {
             const d = JSON.parse(msg).data;
@@ -144,19 +139,16 @@ function startCollector() {
             const p = parseFloat(d.p);
             tradeStore[d.s].lastPrice = p;
             tradeStore[d.s].trades.push({ usd: p * parseFloat(d.q), p, side: d.m ? 'SELL' : 'BUY', t: Date.now() });
-            
             const cutoff = Date.now() - 10800000;
-            if (tradeStore[d.s].trades.length > 800) {
-                tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
-            }
+            if (tradeStore[d.s].trades.length > 800) tradeStore[d.s].trades = tradeStore[d.s].trades.filter(t => t.t > cutoff);
         } catch (e) {}
     });
     collectorWs.on('close', () => { isConnecting = false; setTimeout(startCollector, 5000); });
 }
 
-// --- RADAR ---
+// --- RADAR (RESTORED OUTPUT) ---
 function startRadar() {
-    console.log("⚡ Radar Monitoring Service Started.");
+    console.log("⚡ Radar Monitoring Started.");
     setInterval(() => {
         hotlist.forEach(s => {
             const stats = analyzeSymbol(s);
@@ -175,8 +167,10 @@ function startRadar() {
                     if (mem.pendingCount >= 2 && now - lastAlertForLabel > cooldownMs) {
                         const pStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
                         const cStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
+                        const volStr = `$${(stats.totalFast/1000).toFixed(1)}k`;
                         
-                        sendTelegram(`*${s}* | ${stats.label}\n💵 Price: $${pStr} (${cStr} 1h)\n📊 Bias: ${stats.fBias.toFixed(1)}% | ⚡ Act: ${stats.actMult.toFixed(1)}x`);
+                        // RESTORED FORMAT
+                        sendTelegram(`*${s}* | ${stats.label}\n💵 Price: $${pStr} (${cStr} 1h)\n💰 10m Vol: ${volStr}\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡️ Activity: ${stats.actMult.toFixed(1)}x`);
                         
                         mem.lastLabel = stats.label;
                         mem.alerts[stats.label] = now;
@@ -187,15 +181,12 @@ function startRadar() {
                     mem.pendingLabel = stats.label;
                     mem.pendingCount = 1;
                 }
-            } else {
-                mem.pendingLabel = '';
-                mem.pendingCount = 0;
             }
         });
     }, 30000);
 }
 
-// --- TELEGRAM COMMANDS ---
+// --- COMMANDS ---
 function startListener() {
     setInterval(async () => {
         try {
@@ -214,30 +205,28 @@ function startListener() {
                         const baseline = Math.min(100, ((Date.now() - startTime) / 10800000 * 100)).toFixed(0);
                         sendTelegram(`🤖 *Status Report*\n⏱ Uptime: ${uptimeMin}m\n📊 Baseline: ${baseline}%\n📁 Tracked: ${tracked}\n🔥 Scanner: ${hotlist.length} pairs\n⚙️ Threshold: ${stateMemory.globalThreshold}%`);
                     }
-
                     else if (text.startsWith('/threshold')) {
                         const val = parseFloat(text.split(' ')[1]);
                         if (!isNaN(val)) {
                             stateMemory.globalThreshold = val;
-                            sendTelegram(`✅ *Threshold Updated*\nRequirement: ${val}% 5m price change.`);
+                            sendTelegram(`✅ *Threshold Updated*\nTarget: ${val}% 5m price change.`);
                         } else {
-                            sendTelegram(`❌ Current threshold: ${stateMemory.globalThreshold}%\nUsage: \`/threshold 0.5\``);
+                            sendTelegram(`❌ Current: ${stateMemory.globalThreshold}%. Usage: \`/threshold 0.5\``);
                         }
                     }
-
                     else if (text.startsWith('/check')) {
                         let sym = text.split(' ')[1]?.toUpperCase();
                         if (sym) {
                             if (!sym.endsWith('USDT')) sym += 'USDT';
                             const stats = analyzeSymbol(sym);
                             if (!stats) {
-                                sendTelegram(`❌ No data for ${sym} (not in volume top list).`);
+                                sendTelegram(`❌ No data for ${sym}.`);
                             } else {
                                 const pStr = stats.currentPrice > 1 ? stats.currentPrice.toFixed(2) : stats.currentPrice.toFixed(6);
-                                sendTelegram(`🔍 *Analysis: ${sym}*\n${stats.label}\n💵 Price: $${pStr}\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡ Activity: ${stats.actMult.toFixed(1)}x\n📈 5m: ${stats.change5m.toFixed(2)}% (Target: ${stats.threshold}%)\n📉 1h: ${stats.change1h.toFixed(2)}%`);
+                                const cStr = (stats.change1h >= 0 ? "+" : "") + stats.change1h.toFixed(2) + "%";
+                                const volStr = `$${(stats.totalFast/1000).toFixed(1)}k`;
+                                sendTelegram(`🔍 *Analysis: ${sym}*\n${stats.label}\n💵 Price: $${pStr} (${cStr} 1h)\n💰 10m Vol: ${volStr}\n📊 Bias: ${stats.fBias.toFixed(1)}%\n⚡️ Activity: ${stats.actMult.toFixed(1)}x\n📈 5m: ${stats.change5m.toFixed(2)}% (Need ${stats.threshold}%)`);
                             }
-                        } else {
-                            sendTelegram(`❌ Usage: \`/check [symbol]\``);
                         }
                     }
                 }
